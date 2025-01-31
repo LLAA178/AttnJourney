@@ -36,7 +36,7 @@ class ScaledDotProductAttention(nn.Module):
             output: 加权后的上下文向量 (batch_size, num_heads, seq_len, d_k)
             attention_weights: 注意力分布 (batch_size, num_heads, seq_len, seq_len)
         """
-        # 1) 点积计算
+        # 1) 点积计算 + 缩放
         scores = torch.matmul(query, key.transpose(-2, -1)) / (self.d_model ** 0.5)
         
         # 2) 如果提供了mask，则对mask为0的地方进行填充负无穷
@@ -46,10 +46,10 @@ class ScaledDotProductAttention(nn.Module):
         # 3) 通过softmax得到注意力权重
         attention_weights = F.softmax(scores, dim=-1)
         
-        # 4) 进行dropout
+        # 4) Dropout
         attention_weights = self.dropout(attention_weights)
         
-        # 5) 与value相乘得到输出
+        # 5) 与value相乘得到最终输出
         output = torch.matmul(attention_weights, value)
         
         return output, attention_weights
@@ -60,7 +60,8 @@ class ScaledDotProductAttention(nn.Module):
 #########################################################
 class MultiHeadAttention(nn.Module):
     """
-    标准多头注意力机制。可应用在Transformer的Encoder或Decoder中。
+    标准多头注意力机制，可应用于Transformer的Encoder或Decoder。
+    不包含因果掩码。
     """
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
         """
@@ -77,7 +78,7 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
         
-        # 查询、键、值的线性映射
+        # Q, K, V 的线性映射
         self.query_linear = nn.Linear(d_model, d_model)
         self.key_linear = nn.Linear(d_model, d_model)
         self.value_linear = nn.Linear(d_model, d_model)
@@ -97,27 +98,27 @@ class MultiHeadAttention(nn.Module):
         """
         前向传播:
             query, key, value: (batch_size, seq_len, d_model)
-            mask: (batch_size, seq_len, seq_len) 或 (batch_size, 1, seq_len, seq_len)
+            mask: 可选的注意力掩码 (batch_size, 1, seq_len, seq_len) 或其他可广播形状
         """
         batch_size = query.size(0)
         
         # 1) 映射到多头空间
-        query = self.query_linear(query)  # (batch_size, seq_len, d_model)
-        key = self.key_linear(key)        # (batch_size, seq_len, d_model)
-        value = self.value_linear(value)  # (batch_size, seq_len, d_model)
+        query = self.query_linear(query)  # (bsz, seq_len, d_model)
+        key = self.key_linear(key)        # (bsz, seq_len, d_model)
+        value = self.value_linear(value)  # (bsz, seq_len, d_model)
         
-        # 2) 拆分为多头: (batch_size, num_heads, seq_len, d_k)
+        # 2) 拆分为多头: (bsz, num_heads, seq_len, d_k)
         query = query.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         key = key.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         value = value.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         
-        # 3) 计算注意力
+        # 3) 注意力计算
         output, attention_weights = self.attention(query, key, value, mask)
         
-        # 4) 拼接多头输出 (batch_size, seq_len, d_model)
+        # 4) 拼回原形状 (bsz, seq_len, d_model)
         output = output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         
-        # 5) 最后的线性映射
+        # 5) 输出线性映射
         output = self.output_linear(output)
         
         return output, attention_weights
@@ -129,13 +130,12 @@ class MultiHeadAttention(nn.Module):
 class CausalSelfAttention(nn.Module):
     """
     GPT-style Causal Self-Attention。
-    只允许关注当前和之前的token（通过因果掩码），
-    实现自回归生成。
+    只允许关注当前和之前的token，实现自回归生成。
     """
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
         """
         参数:
-            d_model: 词向量的维度（或隐藏层维度）。
+            d_model: 词向量维度。
             num_heads: 多头数。
             dropout: dropout概率。
         """
@@ -157,13 +157,12 @@ class CausalSelfAttention(nn.Module):
         
     def forward(self, x: torch.Tensor):
         """
-        前向传播:
-            x: (batch_size, seq_len, d_model)，
-               GPT通常只需要一个输入张量作为Self-Attention的Q、K、V。
+        x: (batch_size, seq_len, d_model)，
+           GPT场景下，自注意力Q=K=V=x。
         """
         bsz, seq_len, _ = x.size()
         
-        # 1) 做线性变换并切分成多头
+        # 1) 线性变换并切分多头
         q = self.query_linear(x).view(bsz, seq_len, self.num_heads, self.d_k).transpose(1, 2)
         k = self.key_linear(x).view(bsz, seq_len, self.num_heads, self.d_k).transpose(1, 2)
         v = self.value_linear(x).view(bsz, seq_len, self.num_heads, self.d_k).transpose(1, 2)
@@ -171,18 +170,19 @@ class CausalSelfAttention(nn.Module):
         # 2) 计算 QK^T / sqrt(d_k)
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.d_k ** 0.5)
         
-        # 3) 生成因果掩码（下三角为1, 上三角为0）
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).view(1, 1, seq_len, seq_len)
+        # 3) 因果掩码: 只允许关注到当前及之前位置
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
+        causal_mask = causal_mask.view(1, 1, seq_len, seq_len)
         scores = scores.masked_fill(causal_mask == 0, float('-inf'))
         
-        # 4) 通过softmax得到注意力权重
+        # 4) softmax 注意力权重
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
-        # 5) 得到上下文向量
+        # 5) 加权求和
         out = torch.matmul(attn_weights, v)
         
-        # 6) 拼接多头
+        # 6) 拼接并输出
         out = out.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
         out = self.out_linear(out)
         
@@ -190,76 +190,129 @@ class CausalSelfAttention(nn.Module):
 
 
 #########################################################
-# 3. BERT自注意力 (Encoder-only, Bidirectional)
+# 3. DeepSeek-V3 Multi-Head Latent Attention (MLA)
 #########################################################
-class BertSelfAttention(nn.Module):
+def rope(x: torch.Tensor, n_heads: int, dim_head: int):
     """
-    BERT风格的自注意力机制，属于Encoder-only结构。
-    不考虑因果关系，可双向关注上下文。
+    占位示例：对输入向量做RoPE（Rotary Positional Embedding）变换。
+    在实际工程中，可直接调用已有RoPE函数。
+
+    x: (bsz, seq_len, n_heads, dim_head)
     """
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+    # 此处仅返回原值，省略实际RoPE运算。
+    return x
+
+class MLA(nn.Module):
+    """
+    DeepSeek-V3中的 Multi-Head Latent Attention (MLA) 简化实现。
+    关键点：对 Key/Value 进行低秩压缩，减少KV缓存占用。
+    """
+    def __init__(
+        self,
+        d_model: int,      # 原始embedding/hiddensize (如 7168)
+        n_heads: int,      # 注意力头数
+        d_c_kv: int,       # 压缩后KV总维度 (如 512)
+        d_c_q: int,        # 压缩后Q总维度 (如 512)
+        d_r_h: int,        # 每头RoPE维度 (如 64)
+        d_c_h: int,        # 每头的“压缩维度” (如 64)
+        dropout: float = 0.1
+    ):
         """
-        参数:
-            d_model: 词向量的维度（或隐藏层维度）。
-            num_heads: 多头数。
-            dropout: dropout概率。
+        参数示例:
+          d_model=7168, n_heads=128, d_c_kv=512, d_c_q=512,
+          d_r_h=64, d_c_h=64, ...
         """
-        super(BertSelfAttention, self).__init__()
-        assert d_model % num_heads == 0, "d_model必须能被num_heads整除。"
-        self.num_heads = num_heads
+        super().__init__()
+        
         self.d_model = d_model
-        self.d_k = d_model // num_heads
+        self.n_heads = n_heads
+        self.d_c_kv = d_c_kv
+        self.d_c_q = d_c_q
+        self.d_r_h = d_r_h
+        self.d_c_h = d_c_h
+        
+        # 降维投影
+        self.W_DKV = nn.Linear(d_model, d_c_kv, bias=False)  # -> c^KV
+        self.W_DQ  = nn.Linear(d_model, d_c_q,  bias=False)  # -> c^Q
+        
+        # 升维到多头
+        self.W_UK = nn.Linear(d_c_kv, n_heads * d_c_h, bias=False)  # -> k^C
+        self.W_UV = nn.Linear(d_c_kv, n_heads * d_c_h, bias=False)  # -> v^C
+        self.W_UQ = nn.Linear(d_c_q,  n_heads * d_c_h, bias=False)  # -> q^C
+        
+        # 产生可加RoPE的向量
+        self.W_KR = nn.Linear(d_model,  n_heads * d_r_h, bias=False)  # -> k^R
+        self.W_QR = nn.Linear(d_c_q,    n_heads * d_r_h, bias=False)  # -> q^R
+        
+        # 输出投影
+        self.W_O = nn.Linear(n_heads * d_c_h, d_model, bias=False)
 
-        self.query_linear = nn.Linear(d_model, d_model)
-        self.key_linear = nn.Linear(d_model, d_model)
-        self.value_linear = nn.Linear(d_model, d_model)
-
-        self.attn = ScaledDotProductAttention(self.d_k, dropout=dropout)
-        self.out_linear = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
-
-    def forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor = None):
+    
+    def forward(self, h: torch.Tensor):
         """
-        前向传播:
-            hidden_states: (batch_size, seq_len, d_model)
-            attention_mask: (batch_size, num_heads, seq_len, seq_len) 或能广播到这个形状的张量。
+        h: (batch_size, seq_len, d_model)
+        返回:
+          out: (batch_size, seq_len, d_model)
         """
-        batch_size, seq_len, _ = hidden_states.size()
+        bsz, seq_len, _ = h.size()
 
-        # 1) 映射到Q, K, V
-        query = self.query_linear(hidden_states)
-        key = self.key_linear(hidden_states)
-        value = self.value_linear(hidden_states)
-
-        # 2) 分成多头
-        query = query.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
-        key = key.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
-        value = value.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
-
-        # 3) 计算注意力分数
-        output, attn_weights = self.attn(query, key, value, attention_mask)
-
-        # 4) 拼接并还原形状
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
-
-        # 5) 输出线性层
-        output = self.out_linear(output)
-        output = self.dropout(output)
-
-        return output, attn_weights
+        # 1) 压缩到 c^KV, c^Q
+        c_kv = self.W_DKV(h)  # (bsz, seq_len, d_c_kv)
+        c_q  = self.W_DQ(h)   # (bsz, seq_len, d_c_q)
+        
+        # 2) 升维 -> k^C, v^C
+        k_c = self.W_UK(c_kv) # (bsz, seq_len, n_heads*d_c_h)
+        v_c = self.W_UV(c_kv) # (bsz, seq_len, n_heads*d_c_h)
+        
+        # 3) k^R (含 RoPE)
+        k_r = self.W_KR(h).view(bsz, seq_len, self.n_heads, self.d_r_h)
+        k_r = rope(k_r, self.n_heads, self.d_r_h)
+        
+        # 4) q^C, q^R (含 RoPE)
+        q_c = self.W_UQ(c_q).view(bsz, seq_len, self.n_heads, self.d_c_h)
+        q_r = self.W_QR(c_q).view(bsz, seq_len, self.n_heads, self.d_r_h)
+        q_r = rope(q_r, self.n_heads, self.d_r_h)
+        
+        # 5) 合并 k, q:  [k^C, k^R], [q^C, q^R]
+        k_c = k_c.view(bsz, seq_len, self.n_heads, self.d_c_h)
+        v_c = v_c.view(bsz, seq_len, self.n_heads, self.d_c_h)
+        k = torch.cat([k_c, k_r], dim=-1)  # (bsz, seq_len, n_heads, d_c_h + d_r_h)
+        q = torch.cat([q_c, q_r], dim=-1)  # (bsz, seq_len, n_heads, d_c_h + d_r_h)
+        
+        # 6) 计算注意力: 先转为 (bsz, n_heads, seq_len, dim)
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v_c = v_c.permute(0, 2, 1, 3)
+        
+        # dot-product => (bsz, n_heads, seq_len, seq_len)
+        dim_total = (self.d_c_h + self.d_r_h)  # k,q拼接后维度
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (dim_total ** 0.5)
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+        
+        # 只对 v^C 做加权
+        out_heads = torch.matmul(attn, v_c)  # (bsz, n_heads, seq_len, d_c_h)
+        
+        # 7) 多头拼接 + 输出
+        out_heads = out_heads.permute(0, 2, 1, 3).contiguous()
+        out_heads = out_heads.view(bsz, seq_len, -1)  # (bsz, seq_len, n_heads*d_c_h)
+        
+        out = self.W_O(out_heads)  # (bsz, seq_len, d_model)
+        return out
 
 
 #########################################################
 # 测试与对比
 #########################################################
 if __name__ == "__main__":
-    # 准备测试数据
-    batch_size = 2
-    seq_len = 5
-    d_model = 8
-    num_heads = 2
+    # 测试时的超参（可根据需要调大看区别）
+    batch_size = 32
+    seq_len = 128
+    d_model = 256
+    num_heads = 8
     
-    # (1) 测试标准Transformer多头注意力
+    # 1) 标准多头注意力 (MHA)
     print("=== 测试1: MultiHeadAttention ===")
     query = torch.rand(batch_size, seq_len, d_model)
     key = torch.rand(batch_size, seq_len, d_model)
@@ -268,38 +321,45 @@ if __name__ == "__main__":
     
     start_time = time.time()
     output_mha, attn_mha = mha(query, key, value, mask=None)
-    end_time = time.time()
-    
+    mha_time = (time.time() - start_time) * 1000
     print(f"Output shape (MHA): {output_mha.shape}")
     print(f"Attention shape (MHA): {attn_mha.shape}")
-    print(f"Output mean (MHA): {output_mha.mean().item():.4f}, std: {output_mha.std().item():.4f}")
-    print(f"耗时 (MHA): {(end_time - start_time) * 1000:.2f} ms\n")
+    print(f"Output mean (MHA): {output_mha.mean():.4f}, std: {output_mha.std():.4f}")
+    print(f"耗时 (MHA): {mha_time:.2f} ms\n")
     
-    # (2) 测试GPT风格因果自注意力
+    # 2) GPT风格因果自注意力
     print("=== 测试2: CausalSelfAttention (GPT) ===")
     x = torch.rand(batch_size, seq_len, d_model)
     gpt_attn = CausalSelfAttention(d_model, num_heads)
     
     start_time = time.time()
     output_gpt, attn_gpt = gpt_attn(x)
-    end_time = time.time()
-    
+    gpt_time = (time.time() - start_time) * 1000
     print(f"Output shape (GPT): {output_gpt.shape}")
     print(f"Attention shape (GPT): {attn_gpt.shape}")
-    print(f"Output mean (GPT): {output_gpt.mean().item():.4f}, std: {output_gpt.std().item():.4f}")
-    print(f"耗时 (GPT): {(end_time - start_time) * 1000:.2f} ms\n")
+    print(f"Output mean (GPT): {output_gpt.mean():.4f}, std: {output_gpt.std():.4f}")
+    print(f"耗时 (GPT): {gpt_time:.2f} ms\n")
     
-    # (3) 测试BERT风格自注意力
-    print("=== 测试3: BertSelfAttention ===")
-    hidden_states = torch.rand(batch_size, seq_len, d_model)
-    attention_mask = torch.ones(batch_size, num_heads, seq_len, seq_len)  # 常见的BERT padding mask
-    bert_attn = BertSelfAttention(d_model, num_heads)
+    # 3) DeepSeek-V3风格 MLA
+    print("=== 测试3: MLA (DeepSeek-V3) ===")
+    # 低秩压缩维度：通常 d_c_kv、d_c_q << d_model
+    d_c_kv = 64  # 压缩后KV总维度
+    d_c_q  = 64  # 压缩后Q总维度
+    d_r_h  = 16  # 每头RoPE维度
+    d_c_h  = 16  # 压缩后每头维度
     
+    mla = MLA(d_model, num_heads, d_c_kv, d_c_q, d_r_h, d_c_h, dropout=0.0)
+    x_mla = torch.rand(batch_size, seq_len, d_model)
+
     start_time = time.time()
-    output_bert, attn_bert = bert_attn(hidden_states, attention_mask)
-    end_time = time.time()
-    
-    print(f"Output shape (BERT): {output_bert.shape}")
-    print(f"Attention shape (BERT): {attn_bert.shape}")
-    print(f"Output mean (BERT): {output_bert.mean().item():.4f}, std: {output_bert.std().item():.4f}")
-    print(f"耗时 (BERT): {(end_time - start_time) * 1000:.2f} ms\n")
+    output_mla = mla(x_mla)
+    mla_time = (time.time() - start_time) * 1000
+
+    print(f"Output shape (MLA): {output_mla.shape}")
+    print(f"Output mean (MLA): {output_mla.mean():.4f}, std: {output_mla.std():.4f}")
+    print(f"耗时 (MLA): {mla_time:.2f} ms\n")
+
+    print("=== 结果对比 ===")
+    print(f"MHA耗时:  {mha_time:.2f} ms")
+    print(f"GPT耗时:  {gpt_time:.2f} ms")
+    print(f"MLA耗时:  {mla_time:.2f} ms")
