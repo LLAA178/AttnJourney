@@ -2,21 +2,22 @@
 
 本项目旨在介绍并探讨 **Transformer** 及其衍生模型在大模型领域的发展历程。本节主要关注 **Attention** 机制，结合相关论文与常见问题进行解析。
 
----
+## 1. 视频链接
+[点击这里观看教程](https://www.bilibili.com/video/BV1njFDeNEzW)
 
-## 1. Attention Is All You Need
+## 2. Attention Is All You Need
 
 - **文献链接**: [Attention Is All You Need (arXiv:1706.03762)](https://arxiv.org/pdf/1706.03762)  
 - **背景**: 该论文由 Vaswani 等人在 2017 年提出，为自然语言处理和序列建模带来了革新，其核心在于 **Self-Attention** 及 **Multi-Head Attention** 技术。
 
 ---
 
-## 2. Scaled Dot-Product Attention
+## 3. Scaled Dot-Product Attention
 
 **核心公式**:  
 $$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right) V$$
 
-### 2.1. 为什么要除以 $\sqrt{d_k}$ ？
+### 3.1. 为什么要除以 $\sqrt{d_k}$ ？
 
 在计算注意力分数 ($\text{scores} = QK^\top$) 时，如果向量维度 $d_k$（通常等于 $d_\text{model} / \text{num-heads}$ ）较大，那么`scores`的数值会变大，导致 **Softmax** 的输入出现极端值，从而引发训练不稳定（梯度爆炸或消失）等问题。
 
@@ -27,7 +28,7 @@ $$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\rig
 
 ---
 
-### 2.2. 为什么mask要填充负无穷？
+### 3.2. 为什么mask要填充负无穷？
 
 在注意力机制中，我们通常需要对某些位置进行“屏蔽”（Mask），包括：
 - **Padding Mask** : 对无效位置（如填充符）进行屏蔽；
@@ -45,7 +46,7 @@ scores = scores.masked_fill(mask == 0, float('-inf'))
 
 ---
 
-### 2.3. Dropout的作用是什么？
+### 3.3. Dropout的作用是什么？
 
 ```python
 attention_weights = self.dropout(attention_weights)
@@ -57,7 +58,7 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-### 2.4. 为什么是 $QK^\top$ 之后做Softmax，而不是 $QKV$ 一起？
+### 3.4. 为什么是 $QK^\top$ 之后做Softmax，而不是 $QKV$ 一起？
 
 1. **Q, K, V 各司其职**  
    - $Q$ (Query): “查询”向量  
@@ -75,7 +76,7 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-## 3. Multi-Head Attention
+## 4. Multi-Head Attention
 
 **多头注意力（MHA）** 可以理解为并行地做多份“Scaled Dot-Product Attention”，然后将各头的结果拼接起来并投影到输出空间。其优点在于：
 1. **并行关注不同位置**: 每个注意力头可捕捉不同的特征或上下文依赖；
@@ -89,9 +90,9 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-## 4. GPT自注意力
+## 5. GPT自注意力
 
-### 4.1. GPT Attention的最早论文
+### 5.1. GPT Attention的最早论文
 
 - GPT-1 (2018): *Improving Language Understanding by Generative Pre-Training*  
   [OpenAI Blog](https://openai.com/blog/language-unsupervised) | [Paper (PDF)](https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf)
@@ -100,7 +101,7 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-### 4.2. GPT注意力与标准多头注意力的主要区别
+### 5.2. GPT注意力与标准多头注意力的主要区别
 
 **GPT使用因果掩码**（Causal Mask）在计算Softmax前对未来位置进行屏蔽，保证只能看“过去”token。  
 - 标准多头注意力（如Transformer Encoder）则不需要这种因果限制；
@@ -110,7 +111,7 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-### 4.3. 为什么GPT只有一个输入 $(x)$ 而标准MHA需要 $Q, K, V$ 三个参数？
+### 5.3. 为什么GPT只有一个输入 $(x)$ 而标准MHA需要 $Q, K, V$ 三个参数？
 
 1. 在**自注意力**场景下（Self-Attention）， $Q=K=V$ 都来自同一批张量，如GPT。  
 2. 在**Encoder-Decoder Attention**场景下， $Q$ 通常来自Decoder隐状态， $K, V$ 来自Encoder隐状态，所以要分别传入。
@@ -119,7 +120,7 @@ attention_weights = self.dropout(attention_weights)
 
 ---
 
-## 5. DeepSeek-V3 MLA
+## 6. DeepSeek-V3 MLA
 
 **MLA**（Multi-Head Latent Attention）在Key/Value上进行**低秩压缩**，可显著减小推理时的KV缓存开销，同时在实践中也会带来一定的加速。具体来说：
 
@@ -127,31 +128,31 @@ attention_weights = self.dropout(attention_weights)
 2. 再将 $(d_c)$ 投影到多头所需的 $(d_c^h + d_r^h)$ 维度，用以参与注意力运算；
 3. 只在注意力核心流程上保留较小的矩阵维度，从而降低计算量与内存。
 
-### 5.1. MLA为什么也会加速？
+### 6.1. MLA为什么也会加速？
 
 1. **降维后运算量更小**  
    Key/Value的维度变小，Attention过程中的矩阵乘法规模也随之减小。
 2. **KV缓存量更小**  
    对大模型推理尤其重要，可减少显存或网络带宽瓶颈。
 
-### 5.2. GPT自注意力为何比标准MHA快？
+### 6.2. GPT自注意力为何比标准MHA快？
 
 - 在本地测试中，GPT自注意力封装更直接，函数调用路径更短或可能存在其他优化，从而运行更快。  
 - **Mask**并不会真正“少算”矩阵乘法（一般PyTorch实现中只是在乘法后填充负无穷），更多是实现细节或随机波动造成时差。
 
-### 5.3. 为什么只对 $Q$ 和 $K$ 做RoPE而不对 $V$ ？
+### 6.3. 为什么只对 $Q$ 和 $K$ 做RoPE而不对 $V$ ？
 
 - RoPE的核心思想是让 $QK^\top$ 中出现可体现位置关系的旋转算子， $Q, K$ 各自携带位置信息后，即可让注意力分布反映相对位置。  
 - **V**不需要做旋转；若也做，则还得考虑“逆向”操作，复杂且无明显收益。
 
-### 5.4. `permute`的作用
+### 6.4. `permute`的作用
 
 - PyTorch中`permute`用于**调整张量的维度顺序**，与单纯的2D“转置”不同，可在更高维张量中任意交换维度。  
 - 在注意力中，常见用法是将 $(batch\_size, seq\_len, n\_heads, d\_k)$ 变为 $(batch\_size, n\_heads, seq\_len, d\_k)$ ，方便后续进行矩阵乘法或计算注意力分布。
 
 ---
 
-## 6. 总结
+## 7. 总结
 
 1. **Scaled Dot-Product Attention**是Transformer的基础，除以 $\sqrt{d_k}$ 来稳定数值；
    Mask填充`-∞`可屏蔽无效位置，配合Softmax使注意力权重归零；
